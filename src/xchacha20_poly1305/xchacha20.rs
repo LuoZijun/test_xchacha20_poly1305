@@ -43,8 +43,7 @@ impl XChacha20 {
     pub const KEY_LEN: usize = 32;
     pub const BLOCK_LEN: usize = 64;
     pub const NONCE_LEN: usize = 24;
-
-    const CHACHA20_NONCE_LEN: usize = 12;
+    
     const STATE_LEN: usize = 16; // len in doubleword (32-bits)
 
     // NOTE: 16 bytes 长度的 Key 并没有被标准采纳。

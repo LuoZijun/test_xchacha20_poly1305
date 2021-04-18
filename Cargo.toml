@@ -10,3 +10,6 @@ rand          = "0.8"
 libc          = "0.2"
 libsodium-sys = "0.2"
 crypto2       = "0.1"
+
+[dev-dependencies]
+hex = "0.4"

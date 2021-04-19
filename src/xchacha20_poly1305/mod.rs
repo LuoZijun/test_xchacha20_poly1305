@@ -1,8 +1,28 @@
 use crypto2::mac::Poly1305;
 use crypto2::mem::constant_time_eq;
 
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    not(target_feature = "avx2"),
+))]
+#[path = "./xchacha20.rs"]
 mod xchacha20;
+
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    all(target_feature = "avx2"),
+))]
+#[path = "./xchacha20_avx2.rs"]
+mod xchacha20;
+
+
 pub use self::xchacha20::XChacha20;
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    all(target_feature = "avx2"),
+))]
+pub use self::xchacha20::Chacha20;
+
 
 /// XChaCha20Poly1305
 #[derive(Clone)]
@@ -69,7 +89,7 @@ impl XChacha20Poly1305 {
         self.decrypt_slice_detached(nonce, aad, ciphertext_in_plaintext_out, &tag_in)
     }
 
-    #[allow(clippy::absurd_extreme_comparisons)]
+    #[inline]
     pub fn encrypt_slice_detached(
         &self,
         nonce: &[u8],
@@ -107,7 +127,7 @@ impl XChacha20Poly1305 {
         poly1305.update(&plaintext_in_ciphertext_out);
 
         let mut len_block = [0u8; 16];
-        len_block[0..8].copy_from_slice(&(alen as u64).to_le_bytes());
+        len_block[0.. 8].copy_from_slice(&(alen as u64).to_le_bytes());
         len_block[8..16].copy_from_slice(&(plen as u64).to_le_bytes());
 
         poly1305.update(&len_block);
@@ -117,7 +137,7 @@ impl XChacha20Poly1305 {
         tag_out.copy_from_slice(&tag[..Self::TAG_LEN]);
     }
 
-    #[allow(clippy::absurd_extreme_comparisons)]
+    #[inline]
     pub fn decrypt_slice_detached(
         &self,
         nonce: &[u8],
@@ -151,7 +171,7 @@ impl XChacha20Poly1305 {
         poly1305.update(&ciphertext_in_plaintext_out);
 
         let mut len_block = [0u8; 16];
-        len_block[0..8].copy_from_slice(&(alen as u64).to_le_bytes());
+        len_block[0.. 8].copy_from_slice(&(alen as u64).to_le_bytes());
         len_block[8..16].copy_from_slice(&(clen as u64).to_le_bytes());
 
         poly1305.update(&len_block);

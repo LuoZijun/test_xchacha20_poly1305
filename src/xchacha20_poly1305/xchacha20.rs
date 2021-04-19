@@ -1,23 +1,103 @@
 // use crate::util::xor_si128_inplace;
+// #![allow(unused_variables, dead_code)]
+
+#[cfg(target_arch = "x86")]
+use core::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::*;
+#[cfg(target_arch = "aarch64")]
+use core::arch::aarch64::*;
+
+
+
+
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    all(target_feature = "avx512f"),
+))]
+pub fn xor_si512_inplace(a: &mut [u8], b: &[u8]) {
+    // __m512i _mm512_loadu_si512 (void const* mem_addr)
+    // https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_loadu_si512&expand=101,97,100,6171,94,97,100,3420
+    // 
+    // __m512i _mm512_xor_si512 (__m512i a, __m512i b)
+    // https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_xor_si512&expand=101,97,100,6171,94,97,100,3420,6172
+    // 
+    // void _mm512_storeu_si512 (void* mem_addr, __m512i a)
+    // https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_storeu_si512&expand=101,97,100,6171,94,97,100,3420,5657
+    // 
+    // Add packed 32-bit integers in a and b, and store the results in dst.
+    // fn _mm512_add_epi32(a: __m512i, b: __m512i) -> __m512i;
+    // 
+    unsafe {
+        let mut c = _mm512_loadu_si512(a.as_ptr() as *const __m512i);
+        let d = _mm512_loadu_si512(b.as_ptr() as *const __m512i);
+        c = _mm512_xor_si512(c, d);
+        _mm512_storeu_si512(a.as_mut_ptr() as *mut __m512i, c);
+    }
+}
 
 #[inline]
 fn add_si512_inplace(a: &mut [u32; XChacha20::STATE_LEN], b: &[u32; XChacha20::STATE_LEN]) {
-    for i in 0..XChacha20::STATE_LEN {
-        a[i] = a[i].wrapping_add(b[i]);
+    // for i in 0..XChacha20::STATE_LEN {
+    //     a[i] = a[i].wrapping_add(b[i]);
+    // }
+
+    // _mm256_load_epi32
+    // _mm256_loadu_epi32
+    // _mm256_add_epi32
+    // _mm256_store_epi32
+    // _mm256_storeu_epi32
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        all(target_feature = "avx2"),
+    ))]
+    unsafe {
+        let a_ptr = a.as_ptr() as *const i32;
+        let b_ptr = b.as_ptr() as *const i32;
+        let mut c = _mm256_load_epi32(a_ptr);
+        let d = _mm256_load_epi32(b_ptr);
+        c = _mm256_add_epi32(c, d);
+        _mm256_store_epi32(a_ptr as *mut i32, c);
+
+        let a_ptr = a.as_ptr().offset(8) as *const i32;
+        let b_ptr = b.as_ptr().offset(8) as *const i32;
+        let mut c = _mm256_load_epi32(a_ptr);
+        let d = _mm256_load_epi32(b_ptr);
+        c = _mm256_add_epi32(c, d);
+        _mm256_store_epi32(a_ptr as *mut i32, c);
+    }
+}
+
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    all(target_feature = "avx2"),
+))]
+#[inline]
+fn xor_si256_inplace(a: &mut [u8], b: &[u8]) {
+    unsafe {
+        let mut c = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+        let d = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+        c = _mm256_xor_si256(c, d);
+        _mm256_storeu_si256(a.as_mut_ptr() as *mut __m256i, c);
     }
 }
 
 #[inline]
 fn xor_si512_inplace(a: &mut [u8], b: &[u32; XChacha20::STATE_LEN]) {
-    // NOTE: 看起来编译器会对这种单独的函数做优化，我们不再需要手动写 AVX2/AVX512 的代码咯。
-    use core::slice;
+    // // NOTE: 看起来编译器会对这种单独的函数做优化，我们不再需要手动写 AVX2/AVX512 的代码咯。
+    // use core::slice;
 
-    unsafe {
-        let d1 = slice::from_raw_parts_mut(a.as_mut_ptr() as *mut u32, XChacha20::STATE_LEN);
-        for i in 0..XChacha20::STATE_LEN {
-            d1[i] ^= b[i];
-        }
-    }
+    // unsafe {
+    //     let d1 = slice::from_raw_parts_mut(a.as_mut_ptr() as *mut u32, XChacha20::STATE_LEN);
+    //     for i in 0..XChacha20::STATE_LEN {
+    //         d1[i] ^= b[i];
+    //     }
+    // }
+    let mut keystream = [0u8; XChacha20::BLOCK_LEN];
+    state_to_keystream(&b, &mut keystream);
+
+    xor_si256_inplace(&mut a[ 0..32], &keystream[ 0..32]);
+    xor_si256_inplace(&mut a[32..64], &keystream[32..64]);
 }
 
 #[inline]
@@ -85,7 +165,7 @@ impl XChacha20 {
     }
 
     #[inline]
-    pub fn hchacha20(&self, nonce: &[u8]) -> [u32; 8] {
+    fn hchacha20(&self, nonce: &[u8]) -> [u32; 8] {
         let mut initial_state = self.initial_state;
 
         // Nonce (128-bits, little-endian)
@@ -301,8 +381,9 @@ fn state_to_keystream(
     keystream[60..64].copy_from_slice(&state[15].to_le_bytes());
 }
 
+
 #[test]
-fn test_xchacha20() {
+fn test_xchacha20_hchacha20() {
     // Test Vector for the HChaCha20 Block Function
     // https://github.com/bikeshedders/xchacha-rfc/blob/master/xchacha.md#test-vector-for-the-hchacha20-block-function
     let key = [
@@ -328,4 +409,57 @@ fn test_xchacha20() {
             0x26d3ecdc,
         ]
     );
+}
+
+#[test]
+fn test_xchacha20() {
+    // Example and Test Vectors for XChaCha20
+    // https://github.com/bikeshedders/xchacha-rfc/blob/master/xchacha.md#example-and-test-vectors-for-xchacha20
+    let key = [
+        0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 
+        0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+        0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 
+        0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+    ];
+    let nonce = [
+        0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 
+        0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x58,
+    ];
+
+    let plaintext = b"The dhole (pronounced \"dole\") is also known as the Asiatic wild dog\
+, red dog, and whistling dog. It is about the size of a German shepherd but looks more like a \
+long-legged fox. This highly elusive and skilled jumper is classified with wolves, coyotes, \
+jackals, and foxes in the taxonomic family Canidae.";
+    
+    let cipher = XChacha20::new(&key);
+    let block_counter = 0u32;
+
+    let mut ciphertext = plaintext.to_vec();
+    cipher.encrypt_slice(block_counter, &nonce, &mut ciphertext);
+    assert_eq!(&ciphertext, &[
+        0x45, 0x59, 0xab, 0xba, 0x4e, 0x48, 0xc1, 0x61, 0x02, 0xe8, 0xbb, 0x2c, 0x05, 0xe6, 0x94, 0x7f,
+        0x50, 0xa7, 0x86, 0xde, 0x16, 0x2f, 0x9b, 0x0b, 0x7e, 0x59, 0x2a, 0x9b, 0x53, 0xd0, 0xd4, 0xe9,
+        0x8d, 0x8d, 0x64, 0x10, 0xd5, 0x40, 0xa1, 0xa6, 0x37, 0x5b, 0x26, 0xd8, 0x0d, 0xac, 0xe4, 0xfa,
+        0xb5, 0x23, 0x84, 0xc7, 0x31, 0xac, 0xbf, 0x16, 0xa5, 0x92, 0x3c, 0x0c, 0x48, 0xd3, 0x57, 0x5d,
+        0x4d, 0x0d, 0x2c, 0x67, 0x3b, 0x66, 0x6f, 0xaa, 0x73, 0x10, 0x61, 0x27, 0x77, 0x01, 0x09, 0x3a,
+        0x6b, 0xf7, 0xa1, 0x58, 0xa8, 0x86, 0x42, 0x92, 0xa4, 0x1c, 0x48, 0xe3, 0xa9, 0xb4, 0xc0, 0xda,
+        0xec, 0xe0, 0xf8, 0xd9, 0x8d, 0x0d, 0x7e, 0x05, 0xb3, 0x7a, 0x30, 0x7b, 0xbb, 0x66, 0x33, 0x31,
+        0x64, 0xec, 0x9e, 0x1b, 0x24, 0xea, 0x0d, 0x6c, 0x3f, 0xfd, 0xdc, 0xec, 0x4f, 0x68, 0xe7, 0x44,
+        0x30, 0x56, 0x19, 0x3a, 0x03, 0xc8, 0x10, 0xe1, 0x13, 0x44, 0xca, 0x06, 0xd8, 0xed, 0x8a, 0x2b,
+        0xfb, 0x1e, 0x8d, 0x48, 0xcf, 0xa6, 0xbc, 0x0e, 0xb4, 0xe2, 0x46, 0x4b, 0x74, 0x81, 0x42, 0x40,
+        0x7c, 0x9f, 0x43, 0x1a, 0xee, 0x76, 0x99, 0x60, 0xe1, 0x5b, 0xa8, 0xb9, 0x68, 0x90, 0x46, 0x6e,
+        0xf2, 0x45, 0x75, 0x99, 0x85, 0x23, 0x85, 0xc6, 0x61, 0xf7, 0x52, 0xce, 0x20, 0xf9, 0xda, 0x0c,
+        0x09, 0xab, 0x6b, 0x19, 0xdf, 0x74, 0xe7, 0x6a, 0x95, 0x96, 0x74, 0x46, 0xf8, 0xd0, 0xfd, 0x41,
+        0x5e, 0x7b, 0xee, 0x2a, 0x12, 0xa1, 0x14, 0xc2, 0x0e, 0xb5, 0x29, 0x2a, 0xe7, 0xa3, 0x49, 0xae,
+        0x57, 0x78, 0x20, 0xd5, 0x52, 0x0a, 0x1f, 0x3f, 0xb6, 0x2a, 0x17, 0xce, 0x6a, 0x7e, 0x68, 0xfa,
+        0x7c, 0x79, 0x11, 0x1d, 0x88, 0x60, 0x92, 0x0b, 0xc0, 0x48, 0xef, 0x43, 0xfe, 0x84, 0x48, 0x6c,
+        0xcb, 0x87, 0xc2, 0x5f, 0x0a, 0xe0, 0x45, 0xf0, 0xcc, 0xe1, 0xe7, 0x98, 0x9a, 0x9a, 0xa2, 0x20,
+        0xa2, 0x8b, 0xdd, 0x48, 0x27, 0xe7, 0x51, 0xa2, 0x4a, 0x6d, 0x5c, 0x62, 0xd7, 0x90, 0xa6, 0x63,
+        0x93, 0xb9, 0x31, 0x11, 0xc1, 0xa5, 0x5d, 0xd7, 0x42, 0x1a, 0x10, 0x18, 0x49, 0x74, 0xc7, 0xc5,
+    ]);
+
+    let mut cleartext = ciphertext.clone();
+    cipher.decrypt_slice(block_counter, &nonce, &mut cleartext);
+    assert_eq!(&cleartext, &plaintext);
 }

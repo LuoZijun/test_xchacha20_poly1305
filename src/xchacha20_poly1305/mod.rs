@@ -99,6 +99,9 @@ impl XChacha20Poly1305 {
     ) {
         debug_assert_eq!(nonce.len(), Self::NONCE_LEN);
 
+        let (chacha20, nonce1) = self.chacha20.hchacha20(nonce);
+        let nonce = nonce1;
+
         let alen = aad.len();
         let plen = plaintext_in_ciphertext_out.len();
         let tlen = tag_out.len();
@@ -110,7 +113,7 @@ impl XChacha20Poly1305 {
         let mut poly1305 = {
             let mut keystream = [0u8; Self::BLOCK_LEN];
             // NOTE: 初始 BlockCounter = 0;
-            self.chacha20.encrypt_slice(0, &nonce, &mut keystream);
+            chacha20.encrypt_slice(0, &nonce, &mut keystream);
 
             let mut poly1305_key = [0u8; Poly1305::KEY_LEN];
             poly1305_key.copy_from_slice(&keystream[..Poly1305::KEY_LEN][..]);
@@ -119,8 +122,7 @@ impl XChacha20Poly1305 {
         };
 
         // NOTE: 初始 BlockCounter = 1;
-        self.chacha20
-            .encrypt_slice(1, &nonce, plaintext_in_ciphertext_out);
+        chacha20.encrypt_slice(1, &nonce, plaintext_in_ciphertext_out);
 
         // NOTE: Poly1305 会自动 对齐数据。
         poly1305.update(aad);
@@ -190,6 +192,160 @@ impl XChacha20Poly1305 {
         is_match
     }
 }
+
+/// ChaCha20 and Poly1305 for IETF Protocols
+/// 
+/// <https://tools.ietf.org/html/rfc8439>
+#[derive(Clone)]
+pub struct Chacha20Poly1305 {
+    chacha20: Chacha20,
+}
+
+impl core::fmt::Debug for Chacha20Poly1305 {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.debug_struct("Chacha20Poly1305").finish()
+    }
+}
+
+impl Chacha20Poly1305 {
+    pub const KEY_LEN: usize   = Chacha20::KEY_LEN;   // 32 bytes
+    pub const BLOCK_LEN: usize = Chacha20::BLOCK_LEN; // 64 bytes
+    pub const NONCE_LEN: usize = Chacha20::NONCE_LEN; // 12 bytes
+    pub const TAG_LEN: usize   = Poly1305::TAG_LEN;   // 16 bytes
+    
+    #[cfg(target_pointer_width = "64")]
+    pub const A_MAX: usize = u64::MAX as usize; // 2^64 - 1
+    #[cfg(target_pointer_width = "32")]
+    pub const A_MAX: usize = usize::MAX; // 2^32 - 1
+
+    #[cfg(target_pointer_width = "64")]
+    pub const P_MAX: usize = 274877906880; // (2^32 - 1) * BLOCK_LEN
+    #[cfg(target_pointer_width = "32")]
+    pub const P_MAX: usize = usize::MAX;   // 2^32 - 1
+
+    #[allow(dead_code)]
+    #[cfg(target_pointer_width = "64")]
+    pub const C_MAX: usize = Self::P_MAX + Self::TAG_LEN; // 274,877,906,896
+    #[allow(dead_code)]
+    #[cfg(target_pointer_width = "32")]
+    pub const C_MAX: usize = Self::P_MAX - Self::TAG_LEN; // 4294967279
+    
+    pub const N_MIN: usize = Self::NONCE_LEN;
+    pub const N_MAX: usize = Self::NONCE_LEN;
+    
+    
+    pub fn new(key: &[u8]) -> Self {
+        assert_eq!(Self::KEY_LEN, Poly1305::KEY_LEN);
+        assert_eq!(key.len(), Self::KEY_LEN);
+        
+        let chacha20 = Chacha20::new(key);
+
+        Self { chacha20 }
+    }
+    
+    pub fn encrypt_slice(&self, nonce: &[u8], aad: &[u8], aead_pkt: &mut [u8]) {
+        debug_assert!(aead_pkt.len() >= Self::TAG_LEN);
+
+        let plen = aead_pkt.len() - Self::TAG_LEN;
+        let (plaintext_in_ciphertext_out, tag_out) = aead_pkt.split_at_mut(plen);
+
+        self.encrypt_slice_detached(nonce, aad, plaintext_in_ciphertext_out, tag_out)
+    }
+
+    pub fn decrypt_slice(&self, nonce: &[u8], aad: &[u8], aead_pkt: &mut [u8]) -> bool {
+        debug_assert!(aead_pkt.len() >= Self::TAG_LEN);
+
+        let clen = aead_pkt.len() - Self::TAG_LEN;
+        let (ciphertext_in_plaintext_out, tag_in) = aead_pkt.split_at_mut(clen);
+
+        self.decrypt_slice_detached(nonce, aad, ciphertext_in_plaintext_out, &tag_in)
+    }
+
+    pub fn encrypt_slice_detached(&self, nonce: &[u8], aad: &[u8], plaintext_in_ciphertext_out: &mut [u8], tag_out: &mut [u8]) {
+        debug_assert_eq!(nonce.len(), Self::NONCE_LEN);
+
+        let alen = aad.len();
+        let plen = plaintext_in_ciphertext_out.len();
+        let tlen = tag_out.len();
+
+        debug_assert!(alen <= Self::A_MAX);
+        debug_assert!(plen <= Self::P_MAX);
+        debug_assert!(tlen == Self::TAG_LEN);
+
+        // NOTE: 初始 BlockCounter = 1;
+        self.chacha20.encrypt_slice(1, &nonce, plaintext_in_ciphertext_out);
+
+        let mut poly1305 = {
+            let mut keystream = [0u8; Self::BLOCK_LEN];
+            // NOTE: 初始 BlockCounter = 0;
+            self.chacha20.encrypt_slice(0, &nonce, &mut keystream);
+            let mut poly1305_key = [0u8; Poly1305::KEY_LEN];
+            poly1305_key.copy_from_slice(&keystream[..Poly1305::KEY_LEN][..]);
+
+            Poly1305::new(&poly1305_key[..])
+        };
+
+        // NOTE: Poly1305 会自动 对齐数据。
+        poly1305.update(aad);
+        poly1305.update(&plaintext_in_ciphertext_out);
+
+        let mut len_block = [0u8; 16];
+        len_block[0.. 8].copy_from_slice(&(alen as u64).to_le_bytes());
+        len_block[8..16].copy_from_slice(&(plen as u64).to_le_bytes());
+
+        poly1305.update(&len_block);
+
+        let tag = poly1305.finalize();
+
+        tag_out.copy_from_slice(&tag[..Self::TAG_LEN]);
+    }
+
+    pub fn decrypt_slice_detached(&self, nonce: &[u8], aad: &[u8], ciphertext_in_plaintext_out: &mut [u8], tag_in: &[u8]) -> bool {
+        debug_assert_eq!(nonce.len(), Self::NONCE_LEN);
+
+        let alen = aad.len();
+        let clen = ciphertext_in_plaintext_out.len();
+        let tlen = tag_in.len();
+
+        debug_assert!(alen <= Self::A_MAX);
+        debug_assert!(clen <= Self::P_MAX);
+        debug_assert!(tlen == Self::TAG_LEN);
+
+        let mut poly1305 = {
+            let mut keystream = [0u8; Self::BLOCK_LEN];
+            // NOTE: 初始 BlockCounter = 0;
+            self.chacha20.encrypt_slice(0, &nonce, &mut keystream);
+            let mut poly1305_key = [0u8; Poly1305::KEY_LEN];
+            poly1305_key.copy_from_slice(&keystream[..Poly1305::KEY_LEN][..]);
+
+            Poly1305::new(&poly1305_key[..])
+        };
+        
+        // NOTE: Poly1305 会自动 对齐数据。
+        poly1305.update(aad);
+        poly1305.update(&ciphertext_in_plaintext_out);
+
+        let mut len_block = [0u8; 16];
+        len_block[0.. 8].copy_from_slice(&(alen as u64).to_le_bytes());
+        len_block[8..16].copy_from_slice(&(clen as u64).to_le_bytes());
+
+        poly1305.update(&len_block);
+
+        let tag = poly1305.finalize();
+        
+        // Verify
+        let is_match = constant_time_eq(tag_in, &tag[..Self::TAG_LEN]);
+        
+        if is_match {
+            // NOTE: 初始 BlockCounter = 1;
+            self.chacha20.decrypt_slice(1, &nonce, ciphertext_in_plaintext_out);
+        }
+        
+        is_match
+    }
+}
+
+
 
 #[test]
 fn test_xchacha20_poly1305() {

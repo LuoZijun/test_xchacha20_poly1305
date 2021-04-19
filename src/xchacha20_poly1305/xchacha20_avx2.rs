@@ -5,6 +5,7 @@ use core::arch::x86_64::*;
 
 
 
+
 #[derive(Clone)]
 pub struct XChacha20 {
     inner: Chacha20,
@@ -18,6 +19,47 @@ impl XChacha20 {
 
     pub fn new(key: &[u8]) -> Self {
         Self { inner: Chacha20::new(key) }
+    }
+
+    pub fn hchacha20(&self, nonce: &[u8]) -> (Chacha20, [u8; Chacha20::NONCE_LEN]) {
+        debug_assert_eq!(nonce.len(), Self::NONCE_LEN);
+
+        unsafe {
+            // HChaCha20
+            let mut a = self.inner.a;
+            let mut b = self.inner.b;
+            let mut c = self.inner.c;
+
+            // A 128-bit nonce ( 16 Bytes )
+            let mut d = _mm256_broadcastsi128_si256(_mm_loadu_si128(nonce.as_ptr() as *const __m128i));
+
+            // 20 rounds (diagonal rounds)
+            diagonal_rounds(&mut a, &mut b, &mut c, &mut d);
+
+            let mut chacha20_key = [0u8; Chacha20::KEY_LEN];
+            let chacha20_key_mut_ptr = chacha20_key.as_mut_ptr() as *mut u32;
+
+            // let a = _mm256_castsi256_si128(a);
+            // let b = _mm256_castsi256_si128(b);
+            // let c = _mm256_castsi256_si128(c);
+            // let d = _mm256_castsi256_si128(d);
+
+            _mm_storeu_si128(chacha20_key_mut_ptr.offset(0) as *mut __m128i, _mm256_castsi256_si128(a));
+            _mm_storeu_si128(chacha20_key_mut_ptr.offset(4) as *mut __m128i, _mm256_castsi256_si128(d));
+
+            // NOTE: SSE4.1
+            // let k1 = _mm_extract_epi32(a, 0);
+            // let k2 = _mm_extract_epi32(a, 1);
+            // let k3 = _mm_extract_epi32(a, 2);
+            // let k4 = _mm_extract_epi32(a, 3);
+
+            let mut chacha20_nonce = [0u8; Chacha20::NONCE_LEN];
+            chacha20_nonce[4..12].copy_from_slice(&nonce[16..24]);
+
+            let chacha20 = Chacha20::new(&chacha20_key);
+            // chacha20.in_place(init_block_counter, &chacha20_nonce, plaintext_or_ciphertext);
+            (chacha20, chacha20_nonce)
+        }
     }
 
     #[inline]
